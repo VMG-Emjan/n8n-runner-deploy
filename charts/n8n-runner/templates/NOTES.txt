@@ -1,0 +1,11 @@
+n8n-runner deployed as {{ include "n8n-runner.fullname" . }} (release {{ .Release.Name }}).
+
+Check rollout:
+  kubectl rollout status deploy/{{ include "n8n-runner.fullname" . }} -n {{ .Release.Namespace }}
+
+Port-forward and hit the health endpoint:
+  kubectl port-forward svc/{{ include "n8n-runner.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+  curl -fsS http://localhost:{{ .Values.service.port }}{{ .Values.probes.path }}
+
+{{ if .Values.secret.create }}WARNING: secret.create=true uses an in-values N8N_ENCRYPTION_KEY. Dev/local only.
+For production set secret.create=false and provision {{ .Values.secret.name }} via External Secrets / SSM CSI.{{ end }}

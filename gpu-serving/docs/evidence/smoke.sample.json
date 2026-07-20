@@ -1,0 +1,10 @@
+{
+  "_note": "Real output of gpu-serving/smoke/nim_smoke.py against the hosted NIM OpenAI-compatible endpoint. No secret present. Regenerate anytime with a free nvapi- key.",
+  "base_url": "https://integrate.api.nvidia.com/v1",
+  "model": "meta/llama-3.1-8b-instruct",
+  "latency_s": 0.785,
+  "completion_tokens": 56,
+  "decode_tokens_per_s": 71.29,
+  "response_preview": "GPU-served LLM inference refers to the process of using a Graphics Processing Unit (GPU) to serve Large Language Model (LLM) inferences, where the GPU handles the computationally intensive tasks of pr",
+  "wire_protocol": "openai-chat-completions"
+}

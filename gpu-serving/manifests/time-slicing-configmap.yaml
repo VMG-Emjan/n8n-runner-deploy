@@ -1,0 +1,28 @@
+# GPU time-slicing: lets multiple pods share ONE physical GPU by oversubscribing
+# nvidia.com/gpu. Works on consumer GPUs (RTX 5070 Ti, etc.) where MIG is NOT available.
+# This is the honest local alternative to MIG for a single-consumer-GPU box.
+#
+# Apply, then patch the device plugin to consume this config:
+#   kubectl apply -f time-slicing-configmap.yaml
+#   kubectl -n nvidia-device-plugin patch daemonset nvidia-device-plugin \
+#     --type merge -p '{"spec":{"template":{"spec":{"containers":[{"name":"nvidia-device-plugin","env":[{"name":"CONFIG_FILE","value":"/config/config.yaml"}]}]}}}}'
+#
+# Result: one physical GPU advertises `replicas` schedulable nvidia.com/gpu units.
+# NOTE: time-slicing shares compute cooperatively — NO memory isolation between pods.
+#       MIG (below) gives hard memory+SM isolation but needs a datacenter GPU.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin-config
+  namespace: nvidia-device-plugin
+data:
+  config.yaml: |-
+    version: v1
+    flags:
+      migStrategy: none
+    sharing:
+      timeSlicing:
+        # 4 pods can each request nvidia.com/gpu: 1 against a single physical GPU.
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 4

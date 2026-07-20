@@ -1,0 +1,27 @@
+# Secrets — never commit
+*.env
+.env
+**/e-mail.txt
+*.pem
+*.key
+id_rsa*
+credentials*
+secrets*
+kubeconfig
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Evidence artifacts that may contain live data (commit only redacted samples)
+**/docs/evidence/*.local.*
+# API keys the smoke may echo
+nvapi-*
+
+# Caches / logs / local data
+**/__pycache__/
+**/*.log
+**/logs/
+**/data/
+sbom.json
+trivy-report.*

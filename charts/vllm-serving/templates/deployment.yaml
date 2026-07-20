@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vllm-serving.fullname" . }}
+  labels:
+    {{- include "vllm-serving.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vllm-serving.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vllm-serving.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.gpu.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gpu.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: vllm
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # vLLM OpenAI-compatible server. Same wire protocol as NVIDIA NIM.
+          args:
+            - "--model"
+            - "{{ .Values.model.name }}"
+            - "--max-model-len"
+            - "{{ .Values.model.maxModelLen }}"
+            - "--dtype"
+            - "{{ .Values.model.dtype }}"
+            - "--gpu-memory-utilization"
+            - "{{ .Values.model.gpuMemoryUtilization }}"
+            - "--tensor-parallel-size"
+            - "{{ .Values.model.tensorParallelSize }}"
+            - "--port"
+            - "{{ .Values.service.port }}"
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            # Runs as uid 1000 (runAsNonRoot). Default HF cache is /root/.cache -> not writable.
+            # Redirect caches to writable paths so a non-root pod can actually load the model.
+            - name: HF_HOME
+              value: /tmp/hf
+            - name: HF_HUB_CACHE
+              value: /tmp/hf/hub
+            - name: XDG_CACHE_HOME
+              value: /tmp/cache
+            - name: OUTLINES_CACHE_DIR
+              value: /tmp/outlines
+            {{- if .Values.secret.create }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: HF_TOKEN
+            {{- else if .Values.secret.name }}
+            # Prod: reference an externally-managed secret (External Secrets / SSM CSI).
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: HF_TOKEN
+                  optional: true
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readinessInitialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.periodSeconds }}
+            failureThreshold: {{ .Values.probes.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.livenessInitialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.periodSeconds }}
+            failureThreshold: {{ .Values.probes.failureThreshold }}
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu | quote }}
+              memory: {{ .Values.resources.requests.memory | quote }}
+              {{ .Values.gpu.resourceName }}: {{ .Values.gpu.count }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu | quote }}
+              memory: {{ .Values.resources.limits.memory | quote }}
+              # GPU request == limit is required by the device plugin (non-overcommittable).
+              {{ .Values.gpu.resourceName }}: {{ .Values.gpu.count }}
+          volumeMounts:
+            {{- if .Values.shm.enabled }}
+            - name: dshm
+              mountPath: /dev/shm
+            {{- end }}
+      volumes:
+        {{- if .Values.shm.enabled }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.shm.sizeLimit }}
+        {{- end }}

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: n8n-runner
+description: Production Helm chart for the self-hosted n8n ffmpeg-runner (n8n + ffmpeg/ffprobe).
+type: application
+version: 0.1.0
+# appVersion tracks the container image tag; overridable via values.image.tag
+appVersion: "latest"
+keywords:
+  - n8n
+  - ffmpeg
+  - automation
+  - kubernetes
+maintainers:
+  - name: platform

@@ -1,0 +1,29 @@
+# TensorRT-LLM engine build — the NVIDIA-optimized serving path (vs plain vLLM).
+# Builds an FP8/INT8-quantized TensorRT engine for the target GPU arch, then serves it.
+# OPT-IN: needs a real datacenter/Blackwell build box + hours of compile. Committed as a
+# config artifact proving the TRT-LLM workflow; not run in CI (no free GPU builder).
+#
+# Build (on a GPU host):
+#   docker build -f Dockerfile.trtllm --build-arg MODEL=meta-llama/Llama-3.1-8B-Instruct -t trtllm-llama .
+FROM nvcr.io/nvidia/tritonserver:24.10-trtllm-python-py3
+
+ARG MODEL="meta-llama/Llama-3.1-8B-Instruct"
+ARG DTYPE="float16"
+# GPU compute capability: 90 = Hopper(H100), 120 = Blackwell(B200/RTX50xx). Set to your target.
+ARG SM="90"
+
+ENV MODEL=${MODEL} DTYPE=${DTYPE} SM=${SM}
+WORKDIR /engines
+
+# 1. Convert HF checkpoint -> TRT-LLM checkpoint (weights only; quantization optional).
+# 2. Build a serialized TensorRT engine tuned for this GPU arch + batch/seq shape.
+# The real commands (run at build time on a GPU host):
+#   python /app/tensorrt_llm/examples/llama/convert_checkpoint.py \
+#       --model_dir /hf/${MODEL} --output_dir ./ckpt --dtype ${DTYPE}
+#   trtllm-build --checkpoint_dir ./ckpt --output_dir ./engine \
+#       --gemm_plugin ${DTYPE} --max_batch_size 8 --max_input_len 4096 --max_seq_len 8192
+#
+# Then serve the engine with the OpenAI-compatible frontend (same wire protocol as vLLM/NIM):
+#   trtllm-serve ./engine --host 0.0.0.0 --port 8000
+EXPOSE 8000
+CMD ["bash", "-lc", "echo 'Build the engine first (see comments), then: trtllm-serve ./engine --port 8000'"]

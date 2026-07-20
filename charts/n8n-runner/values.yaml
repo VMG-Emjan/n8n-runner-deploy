@@ -1,0 +1,89 @@
+# Default values for n8n-runner.
+# Swap image.repository to the python-superset (automation) image later without touching templates.
+
+image:
+  # GHCR image built by CI (lowercase owner required by GHCR).
+  repository: ghcr.io/vmg-emjan/n8n-runner
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Set to a name of a Kubernetes secret holding the registry credentials (GHCR).
+# Leave empty for public images or local (kind) images loaded via `kind load`.
+imagePullSecrets: []
+
+replicaCount: 1
+
+# n8n stores workflows + SQLite DB here. Must be persistent.
+persistence:
+  enabled: true
+  size: 2Gi
+  # Empty => cluster default StorageClass. kind ships "standard".
+  storageClass: ""
+  mountPath: /home/node/.n8n
+
+service:
+  type: ClusterIP
+  port: 5678
+
+# n8n runtime configuration. Non-secret env only — secrets come from the Secret below.
+n8n:
+  host: localhost
+  protocol: http
+  port: 5678
+  # Extra plain env vars (non-secret) as key: value.
+  extraEnv: {}
+
+# Secret handling. Two modes:
+#   create=true  -> chart creates a Secret from the values below (dev/local only).
+#   create=false -> reference an existing Secret (prod: External Secrets / SSM CSI).
+secret:
+  create: true
+  # Name of the Secret to create or reference.
+  name: n8n-runner-secret
+  # DEV ONLY. In prod set create=false and provision externally.
+  # N8N_ENCRYPTION_KEY must be stable across restarts or encrypted creds break.
+  data:
+    N8N_ENCRYPTION_KEY: "change-me-32-char-min-dev-only-key"
+
+# Liveness/readiness hit n8n's built-in health endpoint.
+probes:
+  path: /healthz
+  readinessInitialDelaySeconds: 15
+  livenessInitialDelaySeconds: 30
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 384Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+# Hardened pod defaults. Image runs as node (uid 1000).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# Optional HorizontalPodAutoscaler. n8n is stateful (SQLite) — keep off unless using external DB.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 75
+
+# Optional Ingress (off for local; on for cloud with a controller).
+ingress:
+  enabled: false
+  className: ""
+  host: n8n.example.com
+  annotations: {}
+  tls: []

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: vllm-serving
+description: GPU-served LLM (vLLM, OpenAI-compatible) with NVIDIA GPU scheduling + MIG/time-slicing config. $0 skill-proof extension of cloud-deploy-proof.
+type: application
+version: 0.1.0
+# Application version tracks the vLLM OpenAI server image.
+appVersion: "0.6.3"
+keywords:
+  - vllm
+  - tensorrt-llm
+  - gpu
+  - mig
+  - llm-serving
+  - nvidia

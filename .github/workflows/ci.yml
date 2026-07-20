@@ -1,0 +1,237 @@
+name: ci
+
+# $0 DevSecOps + deploy-readiness pipeline. No cloud resources are created here.
+# terraform runs validate + plan only; runtime deploy proof is produced locally via kind (job: local-k8s).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write # GHCR push
+  id-token: write # OIDC to AWS for terraform plan (no static keys)
+
+env:
+  # GHCR requires a lowercase owner. Hardcoded lowercase to keep pushes deterministic.
+  IMAGE: ghcr.io/vmg-emjan/n8n-runner
+  DOCKERFILE: n8n-ffmpeg/Dockerfile
+  # NOTE: do NOT name this DOCKER_CONTEXT — that is a reserved docker env var (selects a
+  # docker context) and breaks every docker/kind call. Use a neutral name.
+  BUILD_CONTEXT: n8n-ffmpeg
+
+jobs:
+  # ---------- Static security scans (all free, no deploy) ----------
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Semgrep
+        run: pip install semgrep
+      - name: Semgrep SAST (report-only)
+        # This repo is infrastructure/config (no application code), so Semgrep findings are
+        # CI/Dockerfile hardening nits, not code vulns — report without blocking. Add --error
+        # here once real application code lands so genuine code findings gate the pipeline.
+        run: semgrep scan --config p/ci .
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks (full history scan)
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.24.3 \
+            detect --source=/repo --redact -v --exit-code=1
+
+  iac-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tfsec (report-only)
+        # Soft-fail: reports IaC findings without blocking. The plan-only infra is a reference
+        # target; tighten (private endpoint, KMS) before a real apply. Flip to gate then.
+        run: docker run --rm -v "$PWD:/src" aquasec/tfsec:latest /src/infra/terraform --soft-fail
+
+  # ---------- Build + image supply-chain (build once, scan, SBOM, push) ----------
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build n8n-runner image
+        # Retry: docker.n8n.io rate-limits anonymous base-image pulls (HTTP 429).
+        run: |
+          for i in 1 2 3 4 5; do
+            docker build -t "$IMAGE:${{ github.sha }}" -f "$DOCKERFILE" "$BUILD_CONTEXT" && break
+            echo "build attempt $i failed (likely registry 429); retrying in 30s"; sleep 30
+          done
+          docker image inspect "$IMAGE:${{ github.sha }}" >/dev/null
+
+      - name: Trivy image vulnerability scan (report-only)
+        # Report-only via dockerized trivy (deterministic; the action's tag resolution was flaky).
+        # Upstream n8n base carries CVEs we don't control — informs rather than blocks.
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image --exit-code 0 --ignore-unfixed \
+            --severity CRITICAL,HIGH "$IMAGE:${{ github.sha }}"
+
+      - name: Generate SBOM (Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+
+      - name: Login to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image (main only)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+          docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:${{ github.sha }}" | tee image-digest.txt
+
+  # ---------- Helm lint + policy gate ----------
+  helm-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Helm lint
+        run: |
+          helm lint charts/n8n-runner
+          helm lint charts/vllm-serving
+      - name: Install conftest
+        run: |
+          VER=0.56.0
+          curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${VER}/conftest_${VER}_Linux_x86_64.tar.gz" | tar xz conftest
+          sudo mv conftest /usr/local/bin/conftest
+      - name: Helm template + policy gate
+        run: |
+          helm template n8n charts/n8n-runner > rendered.yaml
+          conftest test rendered.yaml --policy policy
+          # GPU-serving chart passes the same hardening policy (limits, probes, non-root).
+          helm template vllm charts/vllm-serving > rendered-vllm.yaml
+          conftest test rendered-vllm.yaml --policy policy
+
+  # ---------- GPU-serving runtime smoke (OpenAI wire protocol, hosted NIM) ----------
+  # Proves the serving path end-to-end at $0. Runs only when NVIDIA_API_KEY is configured
+  # (free key from build.nvidia.com); otherwise skips green so PRs without the secret pass.
+  gpu-smoke:
+    runs-on: ubuntu-latest
+    env:
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Runtime smoke against hosted NIM
+        if: env.NVIDIA_API_KEY != ''
+        run: |
+          python gpu-serving/smoke/nim_smoke.py | tee smoke.json
+      - name: Upload smoke evidence
+        if: env.NVIDIA_API_KEY != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-serving-smoke
+          path: smoke.json
+      - name: No key -> skipped
+        if: env.NVIDIA_API_KEY == ''
+        run: echo "NVIDIA_API_KEY not set; runtime smoke skipped (add repo secret to enable)."
+
+  # ---------- Terraform validate + plan (NO apply) ----------
+  terraform:
+    runs-on: ubuntu-latest
+    # secrets context is not allowed in `if:`; surface it as env so steps can gate on it.
+    env:
+      AWS_PLAN_ROLE_ARN: ${{ secrets.AWS_PLAN_ROLE_ARN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Format check
+        run: terraform -chdir=infra/terraform fmt -check
+      - name: Init (no backend)
+        run: terraform -chdir=infra/terraform init -backend=false
+      - name: Validate
+        run: terraform -chdir=infra/terraform validate
+      # Plan needs AWS creds via OIDC. Runs only on main (the OIDC trust is scoped to the main
+      # branch) and only if the role secret is configured; never applies.
+      - name: Configure AWS via OIDC
+        if: env.AWS_PLAN_ROLE_ARN != '' && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
+          aws-region: eu-west-1
+      - name: Plan
+        if: env.AWS_PLAN_ROLE_ARN != '' && github.ref == 'refs/heads/main'
+        run: |
+          terraform -chdir=infra/terraform init
+          terraform -chdir=infra/terraform plan -no-color -input=false | tee tf-plan.txt
+      - name: Upload plan artifact
+        if: env.AWS_PLAN_ROLE_ARN != '' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: tf-plan.txt
+
+  # ---------- Runtime proof on a throwaway local cluster (kind, $0) ----------
+  local-k8s:
+    runs-on: ubuntu-latest
+    # Reuse the image the build job already pushed to GHCR — no second base-image pull (avoids 429).
+    needs: [helm-policy, build]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+      - uses: azure/setup-helm@v4
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull built image + load into kind
+        run: |
+          docker pull "$IMAGE:${{ github.sha }}"
+          docker tag "$IMAGE:${{ github.sha }}" n8n-runner:ci
+          kind load docker-image n8n-runner:ci --name chart-testing
+      - name: Deploy via Helm
+        run: |
+          helm upgrade --install n8n charts/n8n-runner \
+            --set image.repository=n8n-runner \
+            --set image.tag=ci \
+            --set image.pullPolicy=Never \
+            --wait --timeout 5m
+      - name: Prove running state (evidence)
+        run: |
+          kubectl get pods -o wide
+          kubectl rollout status deploy/n8n-n8n-runner --timeout=120s
+          helm list
+      - name: Rollback smoke test
+        run: |
+          helm upgrade n8n charts/n8n-runner \
+            --set image.repository=n8n-runner --set image.tag=ci --set image.pullPolicy=Never \
+            --set replicaCount=1 --wait --timeout 5m
+          helm rollback n8n 1 --wait --timeout 5m
+          helm history n8n

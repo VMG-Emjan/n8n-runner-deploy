@@ -1,0 +1,29 @@
+# Secrets — must never enter the image
+**/.env
+**/*.env
+**/e-mail.txt
+**/*.pem
+**/*.key
+**/id_rsa*
+**/credentials*
+**/secrets*
+
+# VCS / CI
+.git
+.github
+.gitignore
+
+# Docs / evidence / infra (not needed at runtime)
+docs
+infra
+charts
+scripts
+README.md
+**/*.md
+
+# Local data / logs / caches
+**/logs
+**/__pycache__
+**/data
+**/outputs
+**/*.log

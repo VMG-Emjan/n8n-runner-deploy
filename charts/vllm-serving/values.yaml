@@ -1,0 +1,92 @@
+# Default values for vllm-serving.
+# Serves an LLM behind an OpenAI-compatible REST API using vLLM on an NVIDIA GPU.
+# The SAME OpenAI wire protocol as NVIDIA NIM containers and the build.nvidia.com
+# hosted endpoint — switching between them is one base_url change, no client code change.
+
+image:
+  # Official vLLM OpenAI-compatible server. Swap for a NIM container
+  # (e.g. nvcr.io/nim/meta/llama-3.1-8b-instruct) without touching templates.
+  repository: vllm/vllm-openai
+  tag: "v0.6.3"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+# Model + serving args. Small model by default so a single consumer GPU (e.g. RTX 5070 Ti, 16GB)
+# can smoke-test; swap to a larger model on a datacenter GPU.
+model:
+  name: "Qwen/Qwen2.5-0.5B-Instruct"
+  # vLLM server args. maxModelLen kept low to fit tight VRAM.
+  maxModelLen: 4096
+  dtype: "auto"
+  gpuMemoryUtilization: "0.85"
+  # tensorParallelSize > 1 requires that many GPUs (or MIG slices).
+  tensorParallelSize: 1
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# GPU scheduling. Requesting nvidia.com/gpu requires the NVIDIA device plugin on the node.
+# See gpu-serving/manifests/ for device-plugin, time-slicing, and MIG config.
+gpu:
+  # Resource key the scheduler matches. Options:
+  #   nvidia.com/gpu           -> whole GPU (or a time-sliced replica)
+  #   nvidia.com/mig-1g.10gb   -> a single MIG slice (datacenter GPUs only: A100/H100/B200)
+  resourceName: nvidia.com/gpu
+  count: 1
+  # Node selector to pin pods onto GPU nodes. Empty => any node.
+  nodeSelector: {}
+  tolerations: []
+
+# HuggingFace token for gated models. Dev: create=true. Prod: create=false + External Secrets.
+secret:
+  create: false
+  name: hf-token-secret
+  # DEV ONLY. Leave blank for ungated models like Qwen2.5-0.5B.
+  data:
+    HF_TOKEN: ""
+
+# vLLM exposes /health once the model is loaded. Model load can take minutes -> generous delays.
+probes:
+  path: /health
+  readinessInitialDelaySeconds: 60
+  livenessInitialDelaySeconds: 120
+  periodSeconds: 15
+  failureThreshold: 10
+
+# CPU/memory requests are separate from the GPU request above.
+resources:
+  requests:
+    cpu: "1"
+    memory: 4Gi
+  limits:
+    cpu: "4"
+    memory: 16Gi
+
+# vLLM needs a large /dev/shm for tensor-parallel NCCL. Mount an emptyDir with Memory medium.
+shm:
+  enabled: true
+  sizeLimit: 2Gi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+ingress:
+  enabled: false
+  className: ""
+  host: llm.example.com
+  annotations: {}
+  tls: []

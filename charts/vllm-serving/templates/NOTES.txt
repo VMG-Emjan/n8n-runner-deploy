@@ -1,0 +1,15 @@
+vLLM OpenAI-compatible server deployed as {{ include "vllm-serving.fullname" . }}.
+
+Model: {{ .Values.model.name }}
+GPU request: {{ .Values.gpu.count }} x {{ .Values.gpu.resourceName }}
+
+1. Wait for the model to load (first pull + load can take minutes):
+   kubectl rollout status deploy/{{ include "vllm-serving.fullname" . }}
+
+2. Port-forward and hit the OpenAI-compatible API:
+   kubectl port-forward svc/{{ include "vllm-serving.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+   curl http://localhost:{{ .Values.service.port }}/v1/models
+
+3. Same wire protocol as NVIDIA NIM / build.nvidia.com. To run the smoke against the
+   hosted endpoint instead, point the client base_url at https://integrate.api.nvidia.com/v1
+   (see gpu-serving/smoke/nim_smoke.py). No client code changes.
